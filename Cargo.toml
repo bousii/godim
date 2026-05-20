@@ -1,0 +1,12 @@
+[package]
+name = "godim"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = "0.2"
+nvim-rs = { version = "0.6", features = ["use_tokio"] }
+tokio = { version = "1", features = ["full"] }
