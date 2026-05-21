@@ -1,6 +1,6 @@
 use crate::discovery::{find_code_edit, find_script_editor};
 use crate::input::keycode_to_nvim;
-use crate::nvim::client::NvimSession;
+use crate::nvim::client::{EditorState, NvimSession};
 use godot::classes::{
     CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, Script,
 };
@@ -11,9 +11,11 @@ use tokio::runtime::Runtime;
 #[class(tool, base=EditorPlugin)]
 struct GodimPlugin {
     base: Base<EditorPlugin>,
-    runtime: tokio::runtime::Runtime,
-    session: Option<NvimSession>,
+    _runtime: tokio::runtime::Runtime,
+    input_tx: tokio::sync::mpsc::Sender<String>,
+    state_rx: std::sync::mpsc::Receiver<EditorState>,
     attached_editor: Option<Gd<CodeEdit>>,
+    current_state: Option<EditorState>,
 }
 
 #[godot_api]
@@ -27,23 +29,48 @@ impl IEditorPlugin for GodimPlugin {
         let editor_script_changed: Callable = self.base().callable("on_script_changed");
         script_editor.connect("editor_script_changed", &editor_script_changed);
 
-        // Perform typical plugin operations here.
+        self.base_mut().set_process(true);
     }
 
     fn init(base: Base<EditorPlugin>) -> Self {
         godot_print!("Initializing godim plugin");
         let runtime = Runtime::new().expect("failed to create tokio runtime");
         let session = runtime.block_on(NvimSession::start());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<String>(32);
+        let (state_tx, state_rx) = std::sync::mpsc::channel::<EditorState>();
+
+        runtime.spawn(async move {
+            println!("task started");
+            loop {
+                println!("waiting for key");
+                let key = input_rx.recv().await.unwrap();
+                println!("got key {}", key);
+                session.input(&key).await;
+                let state = session.get_state().await;
+                state_tx.send(state).unwrap();
+            }
+        });
+
         Self {
             base,
-            runtime,
-            session: Some(session),
+            _runtime: runtime,
+            input_tx,
+            state_rx,
             attached_editor: None,
+            current_state: None,
         }
     }
 
     fn exit_tree(&mut self) {
-        // Perform typical plugin operations here.
+        // gracefully close neovim and runtime
+    }
+
+    fn process(&mut self, _delta: f64) {
+        let Ok(state) = self.state_rx.try_recv() else {
+            return;
+        };
+        self.current_state = Some(state);
+        self.render_current_state();
     }
 }
 
@@ -56,11 +83,11 @@ impl GodimPlugin {
             return;
         };
 
-        if let Some(ref editor) = self.attached_editor {
-            if editor.is_instance_valid() && editor.instance_id() == current_code_edit.instance_id()
-            {
-                return;
-            }
+        if let Some(ref editor) = self.attached_editor
+            && editor.is_instance_valid()
+            && editor.instance_id() == current_code_edit.instance_id()
+        {
+            return;
         }
 
         let gui_input: Callable = self.base().callable("on_gui_input");
@@ -80,8 +107,10 @@ impl GodimPlugin {
             let keycode = key_event.get_keycode();
             let key_str = keycode.as_str();
             godot_print!("{}", key_str);
+
             let Some(nvim_str) = keycode_to_nvim(
                 keycode,
+                key_event.get_unicode(),
                 key_event.is_shift_pressed(),
                 key_event.is_ctrl_pressed(),
                 key_event.is_alt_pressed(),
@@ -90,21 +119,24 @@ impl GodimPlugin {
                 return;
             };
 
-            self.runtime
-                .block_on(self.session.as_ref().unwrap().input(&nvim_str));
+            let _ = self.input_tx.blocking_send(nvim_str);
 
             /*
              * NOTE: This lets us "consume" the input instead of us just
              * reading the presses and passing it to Godot.
              */
             self.base().get_viewport().unwrap().set_input_as_handled();
-
-            let state = self
-                .runtime
-                .block_on(self.session.as_ref().unwrap().get_state());
-            godot_print!("lines: {:?}", state.lines);
-            godot_print!("cursor: ({}, {})", state.cursor.0, state.cursor.1);
-            godot_print!("mode: {}", state.mode);
         }
+    }
+}
+
+impl GodimPlugin {
+    fn render_current_state(&mut self) {
+        let Some(state) = self.current_state.as_ref() else {
+            return;
+        };
+        println!("lines: {:?}", state.lines);
+        println!("cursor: ({}, {})", state.cursor.0, state.cursor.1);
+        println!("mode: {}", state.mode);
     }
 }
