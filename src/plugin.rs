@@ -1,6 +1,8 @@
 use crate::discovery::{find_code_edit, find_script_editor};
 use crate::nvim::client::NvimSession;
-use godot::classes::{CodeEdit, EditorPlugin, IEditorPlugin, Script};
+use godot::classes::{
+    CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, Script,
+};
 use godot::prelude::*;
 use tokio::runtime::Runtime;
 
@@ -48,7 +50,7 @@ impl IEditorPlugin for GodimPlugin {
 impl GodimPlugin {
     #[func]
     fn on_script_changed(&mut self, _script: Gd<Script>) {
-        let Some(current_code_edit) = find_code_edit() else {
+        let Some(mut current_code_edit) = find_code_edit() else {
             godot_print!("Unable to find current CodeEdit, might not be open");
             return;
         };
@@ -60,7 +62,23 @@ impl GodimPlugin {
             }
         }
 
+        let gui_input: Callable = self.base().callable("on_gui_input");
+        current_code_edit
+            .upcast_mut::<Control>()
+            .connect("gui_input", &gui_input);
+
         godot_print!("Found the CodeEdit!");
         self.attached_editor = Some(current_code_edit);
+    }
+
+    #[func]
+    fn on_gui_input(&mut self, input_event: Gd<InputEvent>) {
+        if let Ok(key_event) = input_event.try_cast::<InputEventKey>()
+            && key_event.is_pressed()
+        {
+            let keycode = key_event.get_keycode();
+            let key_str = keycode.as_str();
+            godot_print!("{}", key_str);
+        }
     }
 }
