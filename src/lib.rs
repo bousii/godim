@@ -1,8 +1,8 @@
 use godot::prelude::*;
 mod discovery;
+mod input;
 mod nvim;
 mod plugin;
-mod utils;
 
 struct GodimExtension;
 

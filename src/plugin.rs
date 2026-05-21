@@ -1,4 +1,5 @@
 use crate::discovery::{find_code_edit, find_script_editor};
+use crate::input::keycode_to_nvim;
 use crate::nvim::client::NvimSession;
 use godot::classes::{
     CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, Script,
@@ -79,6 +80,31 @@ impl GodimPlugin {
             let keycode = key_event.get_keycode();
             let key_str = keycode.as_str();
             godot_print!("{}", key_str);
+            let Some(nvim_str) = keycode_to_nvim(
+                keycode,
+                key_event.is_shift_pressed(),
+                key_event.is_ctrl_pressed(),
+                key_event.is_alt_pressed(),
+            ) else {
+                godot_print!("Unrecognized key code {}", key_str);
+                return;
+            };
+
+            self.runtime
+                .block_on(self.session.as_ref().unwrap().input(&nvim_str));
+
+            /*
+             * NOTE: This lets us "consume" the input instead of us just
+             * reading the presses and passing it to Godot.
+             */
+            self.base().get_viewport().unwrap().set_input_as_handled();
+
+            let state = self
+                .runtime
+                .block_on(self.session.as_ref().unwrap().get_state());
+            godot_print!("lines: {:?}", state.lines);
+            godot_print!("cursor: ({}, {})", state.cursor.0, state.cursor.1);
+            godot_print!("mode: {}", state.mode);
         }
     }
 }
