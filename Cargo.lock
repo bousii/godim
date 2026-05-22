@@ -245,6 +245,7 @@ checksum = "779ae4bf7e8421cf91c0b3b64e7e8b40b862fba4d393f59150042de7c4965a94"
 name = "godim"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "godot",
  "nvim-rs",
  "tokio",

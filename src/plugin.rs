@@ -35,21 +35,11 @@ impl IEditorPlugin for GodimPlugin {
     fn init(base: Base<EditorPlugin>) -> Self {
         godot_print!("Initializing godim plugin");
         let runtime = Runtime::new().expect("failed to create tokio runtime");
-        let session = runtime.block_on(NvimSession::start());
-        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<String>(32);
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<String>(32);
         let (state_tx, state_rx) = std::sync::mpsc::channel::<EditorState>();
+        let mut session = runtime.block_on(NvimSession::start(input_rx, state_tx));
 
-        runtime.spawn(async move {
-            println!("task started");
-            loop {
-                println!("waiting for key");
-                let key = input_rx.recv().await.unwrap();
-                println!("got key {}", key);
-                session.input(&key).await;
-                let state = session.get_state().await;
-                state_tx.send(state).unwrap();
-            }
-        });
+        runtime.spawn(async move { session.listen_for_keys().await });
 
         Self {
             base,
