@@ -2,7 +2,8 @@ use crate::discovery::{find_code_edit, find_script_editor};
 use crate::input::keycode_to_nvim;
 use crate::nvim::client::{EditorState, NvimSession};
 use godot::classes::{
-    CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, Script,
+    CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, Script, TextEdit,
+    text_edit::CaretType,
 };
 use godot::prelude::*;
 use tokio::runtime::Runtime;
@@ -17,7 +18,6 @@ struct GodimPlugin {
     attached_editor: Option<Gd<CodeEdit>>,
     current_state: Option<EditorState>,
 }
-
 #[godot_api]
 impl IEditorPlugin for GodimPlugin {
     fn enter_tree(&mut self) {
@@ -125,8 +125,21 @@ impl GodimPlugin {
         let Some(state) = self.current_state.as_ref() else {
             return;
         };
-        println!("lines: {:?}", state.lines);
-        println!("cursor: ({}, {})", state.cursor.0, state.cursor.1);
-        println!("mode: {}", state.mode);
+        let Some(ref mut editor) = self.attached_editor else {
+            return;
+        };
+        let text = state.lines.join("\n");
+        editor.upcast_mut::<TextEdit>().set_text(&text);
+
+        let (row, col) = state.cursor;
+        editor.set_caret_column(col as i32);
+        editor.set_caret_line((row - 1) as i32);
+
+        let caret_type = match state.mode.as_str() {
+            "i" | "ci" => CaretType::LINE,
+
+            _ => CaretType::BLOCK,
+        };
+        editor.set_caret_type(caret_type);
     }
 }
