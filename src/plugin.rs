@@ -1,11 +1,12 @@
 use crate::discovery::{find_code_edit, find_script_editor};
 use crate::input::keycode_to_nvim;
-use crate::nvim::client::{EditorState, NvimSession};
+use crate::nvim::client::{EditorState, NvimCommand, NvimSession};
 use godot::classes::{
-    CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, Script, TextEdit,
-    text_edit::CaretType,
+    CodeEdit, Control, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, ProjectSettings,
+    Script, TextEdit, text_edit::CaretType,
 };
 use godot::prelude::*;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 
 #[derive(GodotClass)]
@@ -13,10 +14,9 @@ use tokio::runtime::Runtime;
 struct GodimPlugin {
     base: Base<EditorPlugin>,
     _runtime: tokio::runtime::Runtime,
-    input_tx: tokio::sync::mpsc::Sender<String>,
-    state_rx: std::sync::mpsc::Receiver<EditorState>,
+    input_tx: tokio::sync::mpsc::UnboundedSender<NvimCommand>,
+    state: Arc<Mutex<EditorState>>,
     attached_editor: Option<Gd<CodeEdit>>,
-    current_state: Option<EditorState>,
 }
 #[godot_api]
 impl IEditorPlugin for GodimPlugin {
@@ -35,19 +35,17 @@ impl IEditorPlugin for GodimPlugin {
     fn init(base: Base<EditorPlugin>) -> Self {
         godot_print!("Initializing godim plugin");
         let runtime = Runtime::new().expect("failed to create tokio runtime");
-        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<String>(32);
-        let (state_tx, state_rx) = std::sync::mpsc::channel::<EditorState>();
-        let mut session = runtime.block_on(NvimSession::start(input_rx, state_tx));
+        let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<NvimCommand>();
+        let (mut session, state) = runtime.block_on(NvimSession::start(input_rx));
 
-        runtime.spawn(async move { session.listen_for_keys().await });
+        runtime.spawn(async move { session.recv().await });
 
         Self {
             base,
             _runtime: runtime,
             input_tx,
-            state_rx,
+            state,
             attached_editor: None,
-            current_state: None,
         }
     }
 
@@ -56,10 +54,6 @@ impl IEditorPlugin for GodimPlugin {
     }
 
     fn process(&mut self, _delta: f64) {
-        let Ok(state) = self.state_rx.try_recv() else {
-            return;
-        };
-        self.current_state = Some(state);
         self.render_current_state();
     }
 }
@@ -85,8 +79,19 @@ impl GodimPlugin {
             .upcast_mut::<Control>()
             .connect("gui_input", &gui_input);
 
+        current_code_edit
+            .upcast_mut::<TextEdit>()
+            .set_caret_blink_enabled(false);
+
         godot_print!("Found the CodeEdit!");
         self.attached_editor = Some(current_code_edit);
+
+        self.sync_buffer_to_nvim();
+        self.set_nvim_path(
+            ProjectSettings::singleton()
+                .globalize_path(&_script.get_path())
+                .to_string(),
+        );
     }
 
     #[func]
@@ -109,7 +114,8 @@ impl GodimPlugin {
                 return;
             };
 
-            let _ = self.input_tx.blocking_send(nvim_str);
+            let nvim_cmd = NvimCommand::Input(nvim_str);
+            self.input_tx.send(nvim_cmd).unwrap();
 
             /*
              * NOTE: This lets us "consume" the input instead of us just
@@ -122,24 +128,53 @@ impl GodimPlugin {
 
 impl GodimPlugin {
     fn render_current_state(&mut self) {
-        let Some(state) = self.current_state.as_ref() else {
+        let Ok(mut state) = self.state.try_lock() else {
             return;
         };
+
+        if !state.render_me {
+            return;
+        }
+
         let Some(ref mut editor) = self.attached_editor else {
             return;
         };
         let text = state.lines.join("\n");
-        editor.upcast_mut::<TextEdit>().set_text(&text);
-
-        let (row, col) = state.cursor;
-        editor.set_caret_column(col as i32);
-        editor.set_caret_line((row - 1) as i32);
+        if editor.upcast_mut::<TextEdit>().get_text().to_string() != text {
+            editor.upcast_mut::<TextEdit>().set_text(&text);
+        }
 
         let caret_type = match state.mode.as_str() {
-            "i" | "ci" => CaretType::LINE,
+            "i" | "ci" | "insert" => CaretType::LINE,
 
             _ => CaretType::BLOCK,
         };
+
+        let (row, col) = state.cursor;
+        println!("setting caret to row={} col={}", row, col);
+        editor.set_caret_column(col as i32);
+        editor.set_caret_line((row - 1) as i32);
         editor.set_caret_type(caret_type);
+        state.render_me = false;
+    }
+
+    fn sync_buffer_to_nvim(&mut self) {
+        let Some(ref mut editor) = self.attached_editor else {
+            return;
+        };
+        let lines: Vec<String> = editor
+            .upcast_mut::<TextEdit>()
+            .get_text()
+            .to_string()
+            .split("\n")
+            .map(String::from)
+            .collect();
+
+        let nvim_cmd: NvimCommand = NvimCommand::SetBuffer(lines);
+        let _ = self.input_tx.send(nvim_cmd);
+    }
+    fn set_nvim_path(&mut self, path: String) {
+        let nvim_cmd: NvimCommand = NvimCommand::SetPath(path);
+        let _ = self.input_tx.send(nvim_cmd);
     }
 }

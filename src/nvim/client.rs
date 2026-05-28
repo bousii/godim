@@ -1,26 +1,42 @@
 use async_trait::async_trait;
 use nvim_rs::{Handler, Neovim, Value, compat::tokio::Compat, create::tokio as create};
+use std::sync::{Arc, Mutex};
 use tokio::process::ChildStdin;
 
 pub struct EditorState {
     pub lines: Vec<String>,
     pub cursor: (i64, i64),
     pub mode: String,
+    pub render_me: bool,
 }
 
 pub struct NvimSession {
     nvim: Neovim<Compat<ChildStdin>>,
     _io_handle: tokio::task::JoinHandle<Result<(), Box<nvim_rs::error::LoopError>>>,
     _child: tokio::process::Child,
-    input_rx: tokio::sync::mpsc::Receiver<String>,
+    input_rx: tokio::sync::mpsc::UnboundedReceiver<NvimCommand>,
+}
+
+pub enum NvimCommand {
+    Input(String),
+    SetBuffer(Vec<String>),
+    SetPath(String),
+    SetUISize(i64, i64),
 }
 
 impl NvimSession {
     pub async fn start(
-        input_rx: tokio::sync::mpsc::Receiver<String>,
-        state_tx: std::sync::mpsc::Sender<EditorState>,
-    ) -> Self {
-        let handler = NvimHandler { state_tx };
+        input_rx: tokio::sync::mpsc::UnboundedReceiver<NvimCommand>,
+    ) -> (Self, Arc<Mutex<EditorState>>) {
+        let state = Arc::new(Mutex::new(EditorState {
+            lines: vec![],
+            cursor: (0, 0),
+            mode: String::from("n"),
+            render_me: false,
+        }));
+        let handler = NvimHandler {
+            state: state.clone(),
+        };
         let (nvim, _io_handle, _child) = create::new_child_cmd(
             /* NOTE: Can maybe add basic config profiles down the line? */
             tokio::process::Command::new("nvim")
@@ -36,35 +52,63 @@ impl NvimSession {
 
         let options = nvim_rs::UiAttachOptions::new();
         /* NOTE: Placeholder width and height values, grab this from TextEdit later */
-        nvim.ui_attach(80, 24, &options)
+        nvim.ui_attach(1000, 50, &options)
             .await
             .expect("ui_attach failed");
-        Self {
-            nvim,
-            _io_handle,
-            _child,
-            input_rx,
-        }
+        nvim.get_current_buf()
+            .await
+            .unwrap()
+            .attach(true, vec![])
+            .await
+            .expect("buf attach failed");
+        (
+            Self {
+                nvim,
+                _io_handle,
+                _child,
+                input_rx,
+            },
+            state,
+        )
     }
 
-    pub async fn listen_for_keys(&mut self) {
+    pub async fn recv(&mut self) {
         println!("task started");
         loop {
-            println!("waiting for key");
-            let key = self.input_rx.recv().await.unwrap();
-            println!("got key {}", key);
-            self.input(&key).await;
+            let cmd = self.input_rx.recv().await.unwrap();
+            self.handle_nvim_cmd(cmd).await;
         }
     }
 
     pub async fn input(&self, keys: &str) {
         self.nvim.input(keys).await.expect("input failed");
     }
+
+    pub async fn handle_nvim_cmd(&self, cmd: NvimCommand) {
+        let nvim = &self.nvim;
+        match cmd {
+            NvimCommand::SetBuffer(lines) => {
+                let buf = nvim.get_current_buf().await.unwrap();
+                buf.set_lines(0, -1, false, lines).await.unwrap();
+            }
+            NvimCommand::SetPath(path) => {
+                let buf = nvim.get_current_buf().await.unwrap();
+                buf.set_name(&path).await.unwrap();
+            }
+            NvimCommand::Input(input) => {
+                println!("got key {}", input);
+                self.input(&input).await;
+            }
+            NvimCommand::SetUISize(width, height) => {
+                nvim.ui_try_resize(width, height).await.unwrap();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 struct NvimHandler {
-    state_tx: std::sync::mpsc::Sender<EditorState>,
+    state: Arc<Mutex<EditorState>>,
 }
 
 #[async_trait]
@@ -77,54 +121,54 @@ impl Handler for NvimHandler {
         _neovim: Neovim<<Self as Handler>::Writer>,
     ) {
         println!("THERE HAS BEEN A NOTIFICATION {}", _name);
-        if _name == "redraw" && check_for_flush(&_args) {
-            let state = get_state(_neovim).await;
-            println!("lines: {:?}", state.lines);
-            println!("cursor: ({}, {})", state.cursor.0, state.cursor.1);
-            println!("mode: {}", state.mode);
-            self.state_tx.send(state).unwrap();
-        }
-    }
-}
-
-fn check_for_flush(args: &Vec<Value>) -> bool {
-    for arg in args {
-        if let Some(array) = arg.as_array() {
-            if let Some(Value::String(event_name)) = array.first() {
-                if event_name.as_str() == Some("flush") {
-                    return true;
+        let mut state = self.state.lock().unwrap();
+        if _name == "redraw" {
+            for event in &_args {
+                if let Some(array) = event.as_array() {
+                    if let Some(Value::String(event_name)) = array.first() {
+                        match event_name.as_str() {
+                            Some("mode_change") => {
+                                if let Some(inner) = array.get(1).and_then(|v| v.as_array()) {
+                                    let mode = inner.first().and_then(|v| v.as_str()).unwrap();
+                                    state.mode = String::from(mode);
+                                }
+                            }
+                            Some("cursor_goto") => {
+                                if let Some(inner) = array.get(1).and_then(|v| v.as_array()) {
+                                    let row = inner.first().and_then(|v| v.as_i64()).unwrap() + 1;
+                                    let col = inner.get(1).and_then(|v| v.as_i64()).unwrap();
+                                    state.cursor = (row, col);
+                                }
+                            }
+                            Some("flush") => {
+                                state.render_me = true;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
-    }
-    false
-}
-pub async fn get_state(nvim: Neovim<Compat<ChildStdin>>) -> EditorState {
-    let buf = nvim
-        .get_current_buf()
-        .await
-        .expect("get_current_buf failed");
-    let lines = buf.get_lines(0, -1, false).await.expect("get_lines failed");
+        if _name == "nvim_buf_lines_event" {
+            let first_line = _args[2].as_i64().unwrap_or(0) as usize;
+            let last_line = _args[3].as_i64().unwrap_or(-1);
+            let new_lines: Vec<String> = _args[4]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
 
-    let cursor = nvim
-        .get_current_win()
-        .await
-        .expect("get_current_win failed")
-        .get_cursor()
-        .await
-        .expect("get_cursor failed");
-
-    let mode = nvim.get_mode().await.expect("get_mode failed");
-    let mode_str = mode
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("mode"))
-        .and_then(|(_, v)| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    EditorState {
-        lines,
-        cursor,
-        mode: mode_str,
+            if last_line == -1 {
+                // full buffer replace
+                state.lines = new_lines;
+            } else {
+                // replace lines from first_line to last_line with new_lines
+                state
+                    .lines
+                    .splice(first_line..last_line as usize, new_lines);
+            }
+            state.render_me = true;
+        }
     }
 }

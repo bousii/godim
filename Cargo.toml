@@ -7,6 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
+arc = "0.0.1"
 async-trait = "0.1.89"
 godot = "0.2"
 nvim-rs = { version = "0.6", features = ["use_tokio"] }
