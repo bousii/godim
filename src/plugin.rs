@@ -8,15 +8,17 @@ use godot::classes::{
 use godot::prelude::*;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(GodotClass)]
 #[class(tool, base=EditorPlugin)]
 struct GodimPlugin {
     base: Base<EditorPlugin>,
-    _runtime: tokio::runtime::Runtime,
-    input_tx: tokio::sync::mpsc::UnboundedSender<NvimCommand>,
+    _runtime: Runtime,
+    input_tx: UnboundedSender<NvimCommand>,
     state: Arc<Mutex<EditorState>>,
     attached_editor: Option<Gd<CodeEdit>>,
+    render: bool,
 }
 #[godot_api]
 impl IEditorPlugin for GodimPlugin {
@@ -35,8 +37,7 @@ impl IEditorPlugin for GodimPlugin {
     fn init(base: Base<EditorPlugin>) -> Self {
         godot_print!("Initializing godim plugin");
         let runtime = Runtime::new().expect("failed to create tokio runtime");
-        let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<NvimCommand>();
-        let (mut session, state) = runtime.block_on(NvimSession::start(input_rx));
+        let (mut session, state, input_tx) = runtime.block_on(NvimSession::start());
 
         runtime.spawn(async move { session.recv().await });
 
@@ -46,6 +47,7 @@ impl IEditorPlugin for GodimPlugin {
             input_tx,
             state,
             attached_editor: None,
+            render: true,
         }
     }
 
@@ -114,28 +116,50 @@ impl GodimPlugin {
                 return;
             };
 
-            let nvim_cmd = NvimCommand::Input(nvim_str);
-            self.input_tx.send(nvim_cmd).unwrap();
+            let mode = {
+                let Ok(state) = self.state.try_lock() else {
+                    return;
+                };
+                state.mode.clone()
+            };
+            let is_insert = mode == "insert";
+            let is_escaping = nvim_str == "<Esc>" || nvim_str == "<C-c>";
+            println!("mode {} str {}", mode, nvim_str);
+            if is_insert && !is_escaping {
+                self.render = false;
+                return;
+            }
 
             /*
              * NOTE: This lets us "consume" the input instead of us just
              * reading the presses and passing it to Godot.
              */
             self.base().get_viewport().unwrap().set_input_as_handled();
+
+            let nvim_cmd = NvimCommand::Input(nvim_str);
+            let res = self.input_tx.send(nvim_cmd);
+            if res.is_err() {
+                println!("Error in sending on_gui_input");
+            }
+            if is_insert && is_escaping {
+                self.sync_buffer_to_nvim();
+                // if let Some(ref mut editor) = self.attached_editor {
+                //     editor.upcast_mut::<Control>().release_focus();
+                // }
+                self.render = true;
+            }
         }
     }
 }
 
 impl GodimPlugin {
     fn render_current_state(&mut self) {
-        let Ok(mut state) = self.state.try_lock() else {
-            return;
-        };
-
-        if !state.render_me {
+        if !self.render {
             return;
         }
-
+        let Ok(state) = self.state.try_lock() else {
+            return;
+        };
         let Some(ref mut editor) = self.attached_editor else {
             return;
         };
@@ -151,11 +175,10 @@ impl GodimPlugin {
         };
 
         let (row, col) = state.cursor;
-        println!("setting caret to row={} col={}", row, col);
+        // println!("setting caret to row={} col={}", row, col);
         editor.set_caret_column(col as i32);
         editor.set_caret_line((row - 1) as i32);
         editor.set_caret_type(caret_type);
-        state.render_me = false;
     }
 
     fn sync_buffer_to_nvim(&mut self) {
@@ -169,12 +192,17 @@ impl GodimPlugin {
             .split("\n")
             .map(String::from)
             .collect();
-
         let nvim_cmd: NvimCommand = NvimCommand::SetBuffer(lines);
-        let _ = self.input_tx.send(nvim_cmd);
+        let res = self.input_tx.send(nvim_cmd);
+        if res.is_err() {
+            println!("Error in sending sync_buffer_to_nvim");
+        }
     }
     fn set_nvim_path(&mut self, path: String) {
         let nvim_cmd: NvimCommand = NvimCommand::SetPath(path);
-        let _ = self.input_tx.send(nvim_cmd);
+        let res = self.input_tx.send(nvim_cmd);
+        if res.is_err() {
+            println!("Error in sending set_nvim_path");
+        }
     }
 }

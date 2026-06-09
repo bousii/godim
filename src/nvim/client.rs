@@ -2,40 +2,38 @@ use async_trait::async_trait;
 use nvim_rs::{Handler, Neovim, Value, compat::tokio::Compat, create::tokio as create};
 use std::sync::{Arc, Mutex};
 use tokio::process::ChildStdin;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 pub struct EditorState {
     pub lines: Vec<String>,
     pub cursor: (i64, i64),
     pub mode: String,
-    pub render_me: bool,
 }
 
 pub struct NvimSession {
     nvim: Neovim<Compat<ChildStdin>>,
     _io_handle: tokio::task::JoinHandle<Result<(), Box<nvim_rs::error::LoopError>>>,
     _child: tokio::process::Child,
-    input_rx: tokio::sync::mpsc::UnboundedReceiver<NvimCommand>,
+    input_rx: UnboundedReceiver<NvimCommand>,
 }
 
 pub enum NvimCommand {
     Input(String),
     SetBuffer(Vec<String>),
     SetPath(String),
-    SetUISize(i64, i64),
 }
 
 impl NvimSession {
-    pub async fn start(
-        input_rx: tokio::sync::mpsc::UnboundedReceiver<NvimCommand>,
-    ) -> (Self, Arc<Mutex<EditorState>>) {
+    pub async fn start() -> (Self, Arc<Mutex<EditorState>>, UnboundedSender<NvimCommand>) {
+        let (input_tx, input_rx) = unbounded_channel::<NvimCommand>();
         let state = Arc::new(Mutex::new(EditorState {
             lines: vec![],
             cursor: (0, 0),
             mode: String::from("n"),
-            render_me: false,
         }));
         let handler = NvimHandler {
             state: state.clone(),
+            // input_tx: input_tx.clone(),
         };
         let (nvim, _io_handle, _child) = create::new_child_cmd(
             /* NOTE: Can maybe add basic config profiles down the line? */
@@ -69,6 +67,7 @@ impl NvimSession {
                 input_rx,
             },
             state,
+            input_tx,
         )
     }
 
@@ -99,15 +98,13 @@ impl NvimSession {
                 println!("got key {}", input);
                 self.input(&input).await;
             }
-            NvimCommand::SetUISize(width, height) => {
-                nvim.ui_try_resize(width, height).await.unwrap();
-            }
         }
     }
 }
 
 #[derive(Clone)]
 struct NvimHandler {
+    // input_tx: tokio::sync::mpsc::UnboundedSender<NvimCommand>,
     state: Arc<Mutex<EditorState>>,
 }
 
@@ -140,9 +137,7 @@ impl Handler for NvimHandler {
                                     state.cursor = (row, col);
                                 }
                             }
-                            Some("flush") => {
-                                state.render_me = true;
-                            }
+                            Some("flush") => {}
                             _ => {}
                         }
                     }
@@ -168,7 +163,6 @@ impl Handler for NvimHandler {
                     .lines
                     .splice(first_line..last_line as usize, new_lines);
             }
-            state.render_me = true;
         }
     }
 }
