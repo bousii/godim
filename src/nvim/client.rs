@@ -20,6 +20,7 @@ pub struct NvimSession {
 pub enum NvimCommand {
     Input(String),
     SetBuffer(Vec<String>),
+    SetCursor(i32, i32),
     SetPath(String),
 }
 
@@ -88,11 +89,24 @@ impl NvimSession {
         match cmd {
             NvimCommand::SetBuffer(lines) => {
                 let buf = nvim.get_current_buf().await.unwrap();
-                buf.set_lines(0, -1, false, lines).await.unwrap();
+                let res = buf.set_lines(0, -1, false, lines).await;
+                if res.is_err() {
+                    println!("Error in setting buffer handle_nvim_cmd");
+                }
+            }
+            NvimCommand::SetCursor(row, col) => {
+                let win = nvim.get_current_win().await.unwrap();
+                let res = win.set_cursor((row as i64, col as i64)).await;
+                if res.is_err() {
+                    println!("Error in setting cursor handle_nvim_cmd");
+                }
             }
             NvimCommand::SetPath(path) => {
                 let buf = nvim.get_current_buf().await.unwrap();
-                buf.set_name(&path).await.unwrap();
+                let res = buf.set_name(&path).await;
+                if res.is_err() {
+                    println!("Error in setting buffer path handle_nvim_cmd");
+                }
             }
             NvimCommand::Input(input) => {
                 println!("got key {}", input);

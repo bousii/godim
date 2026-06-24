@@ -175,7 +175,6 @@ impl GodimPlugin {
         };
 
         let (row, col) = state.cursor;
-        // println!("setting caret to row={} col={}", row, col);
         editor.set_caret_column(col as i32);
         editor.set_caret_line((row - 1) as i32);
         editor.set_caret_type(caret_type);
@@ -197,7 +196,16 @@ impl GodimPlugin {
         if res.is_err() {
             println!("Error in sending sync_buffer_to_nvim");
         }
+
+        let caret_row = editor.get_caret_line();
+        let caret_col = editor.get_caret_column();
+        let nvim_cmd = NvimCommand::SetCursor(caret_row + 1, caret_col - 1);
+        let res = self.input_tx.send(nvim_cmd);
+        if res.is_err() {
+            println!("Error in sending sync_buffer_to_nvim");
+        }
     }
+
     fn set_nvim_path(&mut self, path: String) {
         let nvim_cmd: NvimCommand = NvimCommand::SetPath(path);
         let res = self.input_tx.send(nvim_cmd);
