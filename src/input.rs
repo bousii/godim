@@ -58,6 +58,9 @@ pub fn keycode_to_nvim(
             if c == '\0' {
                 return None;
             }
+            if c == '<' {
+                return Some("<LT>".to_string());
+            }
             return Some(apply_mods(c.to_string(), false, ctrl, shift, alt));
         }
     };
