@@ -63,18 +63,28 @@ impl IEditorPlugin for GodimPlugin {
 #[godot_api]
 impl GodimPlugin {
     #[func]
+    fn detach(&mut self) {
+        let callable = self.base().callable("on_gui_input");
+        if let Some(ref mut editor) = self.attached_editor {
+            if editor.is_instance_valid() {
+                editor
+                    .upcast_mut::<Control>()
+                    .disconnect("gui_input", &callable);
+            }
+        }
+        self.attached_editor = None;
+    }
+
+    #[func]
     fn on_script_changed(&mut self, _script: Gd<Script>) {
+        if self.attached_editor.is_some() {
+            self.detach();
+        }
+
         let Some(mut current_code_edit) = find_code_edit() else {
             godot_print!("Unable to find current CodeEdit, might not be open");
             return;
         };
-
-        if let Some(ref editor) = self.attached_editor
-            && editor.is_instance_valid()
-            && editor.instance_id() == current_code_edit.instance_id()
-        {
-            return;
-        }
 
         let gui_input: Callable = self.base().callable("on_gui_input");
         current_code_edit
