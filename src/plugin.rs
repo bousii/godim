@@ -20,6 +20,7 @@ struct GodimPlugin {
     attached_editor: Option<Gd<CodeEdit>>,
     render: bool,
 }
+
 #[godot_api]
 impl IEditorPlugin for GodimPlugin {
     fn enter_tree(&mut self) {
