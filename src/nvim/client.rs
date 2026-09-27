@@ -102,7 +102,9 @@ impl NvimSession {
                 self.input(&input).await;
             }
             NvimCommand::SetBuffer(lines) => {
-                let buf = nvim.get_current_buf().await.unwrap();
+                let Ok(buf) = nvim.get_current_buf().await else {
+                    println!("Error getting buffer");
+                }
                 if buf.set_lines(0, -1, false, lines).await.is_err() {
                     println!("Error setting buffer");
                 }
